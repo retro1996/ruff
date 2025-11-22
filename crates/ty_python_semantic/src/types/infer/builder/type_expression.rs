@@ -147,7 +147,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                     }
                     // anything else is an invalid annotation:
                     op => {
-                        self.infer_binary_expression(binary);
+                        self.infer_binary_expression(binary, TypeContext::default());
                         if let Some(mut diag) = self.report_invalid_type_expression(
                             expression,
                             format_args!(
@@ -518,7 +518,10 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
     }
 
     /// Infer the type of a string type expression.
-    fn infer_string_type_expression(&mut self, string: &ast::ExprStringLiteral) -> Type<'db> {
+    pub(super) fn infer_string_type_expression(
+        &mut self,
+        string: &ast::ExprStringLiteral,
+    ) -> Type<'db> {
         match parse_string_annotation(&self.context, string) {
             Some(parsed) => {
                 // String annotations are always evaluated in the deferred context.
@@ -783,6 +786,24 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                     }
                     Type::unknown()
                 }
+                KnownInstanceType::GenericContext(_) => {
+                    self.infer_type_expression(slice);
+                    if let Some(builder) = self.context.report_lint(&INVALID_TYPE_FORM, subscript) {
+                        builder.into_diagnostic(format_args!(
+                            "`ty_extensions.GenericContext` is not allowed in type expressions",
+                        ));
+                    }
+                    Type::unknown()
+                }
+                KnownInstanceType::Specialization(_) => {
+                    self.infer_type_expression(slice);
+                    if let Some(builder) = self.context.report_lint(&INVALID_TYPE_FORM, subscript) {
+                        builder.into_diagnostic(format_args!(
+                            "`ty_extensions.Specialization` is not allowed in type expressions",
+                        ));
+                    }
+                    Type::unknown()
+                }
                 KnownInstanceType::TypeVar(_) => {
                     self.infer_type_expression(slice);
                     todo_type!("TypeVar annotations")
@@ -825,6 +846,10 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                     self.infer_type_expression(slice);
                     todo_type!("Generic manual PEP-695 type alias")
                 }
+                KnownInstanceType::LiteralStringAlias(_) => {
+                    self.infer_type_expression(slice);
+                    todo_type!("Generic stringified PEP-613 type alias")
+                }
                 KnownInstanceType::UnionType(_) => {
                     self.infer_type_expression(slice);
                     todo_type!("Generic specialization of types.UnionType")
@@ -858,7 +883,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                     Type::unknown()
                 }
             },
-            Type::Dynamic(DynamicType::Todo(_)) => {
+            Type::Dynamic(_) => {
                 self.infer_type_expression(slice);
                 value_ty
             }
@@ -887,11 +912,27 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                     }
                 }
             }
-            _ => {
-                // TODO: Emit a diagnostic once we've implemented all valid subscript type
-                // expressions.
+            Type::GenericAlias(_) => {
                 self.infer_type_expression(slice);
-                todo_type!("unknown type subscript")
+                // If the generic alias is already fully specialized, this is an error. But it
+                // could have been specialized with another typevar (e.g. a type alias like `MyList
+                // = list[T]`), in which case it's later valid to do `MyList[int]`.
+                todo_type!("specialized generic alias in type expression")
+            }
+            Type::StringLiteral(_) => {
+                self.infer_type_expression(slice);
+                // For stringified TypeAlias; remove once properly supported
+                todo_type!("string literal subscripted in type expression")
+            }
+            _ => {
+                self.infer_type_expression(slice);
+                if let Some(builder) = self.context.report_lint(&INVALID_TYPE_FORM, subscript) {
+                    builder.into_diagnostic(format_args!(
+                        "Invalid subscript of object of type `{}` in type expression",
+                        value_ty.display(self.db())
+                    ));
+                }
+                Type::unknown()
             }
         }
     }
@@ -1284,10 +1325,9 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                     self.infer_type_expression(arguments_slice);
 
                     if let Some(builder) = self.context.report_lint(&INVALID_TYPE_FORM, subscript) {
-                        let diag = builder.into_diagnostic(format_args!(
-                            "Special form `{}` expected exactly one type parameter",
-                            special_form.repr()
-                        ));
+                        let diag = builder.into_diagnostic(
+                            "Special form `typing.TypeIs` expected exactly one type parameter",
+                        );
                         diagnostic::add_type_expression_reference_link(diag);
                     }
 
